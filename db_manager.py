@@ -1,108 +1,140 @@
-from tkinter.font import ROMAN
-
 import psycopg2
 from psycopg2 import sql
-from typing import List, Tuple, Optional
 
 
 class DBManager:
-    """Инициализирует соединение с базой данный"""
-
-    __slots__ = ('_connection', '_cursor')
-
-    def __init__(self, db_name: str, user: str, password: str, host: str = 'localhost', port: str = '5432'):
-        self._connection = psycopg2.connect(
-            db_name=db_name,
-            user=ROMAN,
+    def __init__(self, db_name, user, password, host='localhost', port=5432):
+        self.connection = psycopg2.connect(
+            dbname=db_name,
+            user=user,
             password=password,
             host=host,
             port=port
         )
-        self._cursor = self._connection.cursor()
+        self.connection.autocommit = True
 
     def create_tables(self):
-        """Создает таблицы для хранения информации о компаниях и вакансиях в базе данных"""
-        self._cursor.execute("""
-            CREATE TABLE OF NOT EXISTS companies (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(200) NOT NULL,
-                vacancies_count INTEGER DEFAULT 0
-            );
-        """)
+        with self.connection.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS companies (
+                    id SERIAL PRIMARY KEY,
+                    company_id VARCHAR(50) UNIQUE NOT NULL,
+                    name VARCHAR(255),
+                    url VARCHAR(255),
+                    description TEXT,
+                    industry VARCHAR(255),
+                    size VARCHAR(50),
+                    website VARCHAR(255)
+                );
+            """)
 
-        self._cursor.execute("""
-            CREATE TABLE OF NOT EXISTS vacancies ( 
-                id SERIAL PRIMARY KEY,
-                title VARCHAR(200) NOT NULL,
-                salary_min INTEGER,
-                salary_max INTEGER,
-                url VARCHAR(255),
-                company_id INTEGER REFERENCES companies(id)    
-            );
-        """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS vacancies (
+                    id SERIAL PRIMARY KEY,
+                    vacancy_id VARCHAR(50) UNIQUE NOT NULL,
+                    company_id INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+                    name VARCHAR(255),
+                    description TEXT,
+                    salary_from INTEGER,
+                    salary_to INTEGER,
+                    salary_currency VARCHAR(10),
+                    url VARCHAR(255),
+                    published_at TIMESTAMP
+                );
+            """)
 
-        self._connection.commit()
+    def insert_company(self, company_data):
+        with self.connection.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO companies (company_id, name, url, description, industry, size, website)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (company_id) DO NOTHING;
+            """, (
+                company_data.get('id'),
+                company_data.get('name'),
+                company_data.get('url'),
+                company_data.get('description'),
+                company_data.get('industry'),
+                company_data.get('size'),
+                company_data.get('site_url')
+            ))
 
-    def insert_company(self, name: str) -> int:
-        """Вставляет новю запись о компании в таблицу"""
-        self._cursor.execute("INSERT INTO companies (name) VALUES (%s) RETURNING id;", (name,))
-        self._connection.commit()
-        return self._cursor.fetchall()[0]
+    def insert_vacancy(self, vacancy_data, company_db_id):
+        with self.connection.cursor() as cursor:
+            salary_from = vacancy_data['salary']['from'] if vacancy_data['salary'] else None
+            salary_to = vacancy_data['salary']['to'] if vacancy_data['salary'] else None
+            salary_currency = vacancy_data['salary']['currency'] if vacancy_data['salary'] else None
 
-    def insert_vacancy(self, title: str, salary_min: Optional[int], salary_max: Optional[int], url: str,
-                       company_id: int):
-        """Вставляет новую запись о вакансии в таблицу"""
-        self._cursor.execute("""
-            INSERT INTO vacancies (title, salary_min, salary_max, url, company_id)
-            VALUES (%s, %s, %s, %s, %s);
-        """, (title, salary_min, salary_max, url, company_id))
-        self._connection.commit()
+            cursor.execute("""
+                INSERT INTO vacancies (vacancy_id, company_id, name, description, salary_from, salary_to, salary_currency, url, published_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_timestamp(%s))
+                ON CONFLICT (vacancy_id) DO NOTHING;
+            """, (
+                vacancy_data.get('id'),
+                company_db_id,
+                vacancy_data.get('name'),
+                vacancy_data.get('description'),
+                salary_from,
+                salary_to,
+                salary_currency,
+                vacancy_data.get('alternate_url'),
+                vacancy_data.get('published_at') / 1000 if vacancy_data.get('published_at') else None
+            ))
 
-    def get_companies_and_vacancies_count(self) -> List[Tuple[str, int]]:
-        """Получает список всех компаний и количество вакансий у каждой компании"""
-        self._cursor.execute("""
-            SELECT c.name,
-            COUNT(v.id),
-            FROM companies c
-            LEFT JOIN vacancies v ON c.id = v.company_id 
-            GROUP BY c.id;
-        """)
-        return self._cursor.fetchall()
+    def get_companies_and_vacancies_count(self):
+        with self.connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT c.name, COUNT(v.id) AS vacancies_count
+                FROM companies c
+                LEFT JOIN vacancies v ON c.id = v.company_id
+                GROUP BY c.name;
+            """)
+            return cursor.fetchall()
 
-    def get_all_vacancies(self) -> List[Tuple[str, int, int, str]]:
-        """Получает список всех вакансий с указанием названиями компании и зарплаты"""
-        self._cursor.execute("""
-            SELECT v.title, v.salary_min, v.salary_max, c.name
-            FROM vacancies v
-            JOIN companies c ON v.company_id = c.id;
-        """)
-        return self._cursor.fetchall
+    def get_all_vacancies(self):
+        with self.connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT c.name AS company_name,
+                       v.name AS vacancy_name,
+                       v.salary_from || '-' || v.salary_to AS salary_range,
+                       v.url AS link
+                FROM vacancies v
+                JOIN companies c ON v.company_id = c.id;
+            """)
+            return cursor.fetchall()
 
-    def get_avg_salary(self) -> Optional[float]:
-        """Получает среднюю зарплату по всем вакансиям"""
-        self._cursor.execute("SELECT AVG(salary_min) FROM vacancies;")
-        result = self._cursor.fetchone()
-        return result[0] if result else None
+    def get_avg_salary(self):
+        with self.connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT AVG((salary_from + salary_to)/2.0) FROM vacancies WHERE salary_from IS NOT NULL AND salary_to IS NOT NULL;
+            """)
+            result = cursor.fetchone()
+            return result[0]
 
-    def get_vacancies_with_higher_salary(self) -> List[Tuple]:
-        """Получает список всех вакансий с зарплатой выше средней по всем вакансиям"""
+    def get_vacancies_with_higher_salary(self):
         avg_salary = self.get_avg_salary()
-        if avg_salary is None:
-            return []
-        self._cursor.execute("""
-            SELECT * FROM vacancies WHERE salary_min > %s;
-        """, (avg_salary,))
-        return self._cursor.fetchall()
+        with self.connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT c.name AS company_name,
+                       v.name AS vacancy_name,
+                       v.salary_from || '-' || v.salary_to AS salary_range,
+                       v.url AS link
+                FROM vacancies v
+                JOIN companies c ON v.company_id = c.id
+                WHERE (v.salary_from + v.salary_to)/2.0 > %s;
+            """, (avg_salary,))
+            return cursor.fetchall()
 
-    def get_vacancies_with_keyword(self, keyword: str) -> List[Tuple]:
-        """Получает список всех вакансий по ключевому слову в названии"""
-        query = f"%{keyword}%"
-        self._cursor.execute("""
-            SELECT * FROM vacancies WHERE title ILIKE %s;
-        """, (query,))
-        return self._cursor.fetchall()
-
-    def close(self) -> None:
-        """Закрывает соединение"""
-        self._cursor.close()
-        self._connection.close()
+    def get_vacancies_with_keyword(self, keyword):
+        pattern = f"%{keyword}%"
+        with self.connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT c.name AS company_name,
+                       v.name AS vacancy_name,
+                       v.salary_from || '-' || v.salary_to AS salary_range,
+                       v.url AS link
+                FROM vacancies v
+                JOIN companies c ON v.company_id = c.id
+                WHERE LOWER(v.name) LIKE LOWER(%s);
+            """, (pattern,))
+            return cursor.fetchall()
