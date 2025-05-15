@@ -9,7 +9,14 @@ def get_companies(ids):
     """
     Получает информацию о компаниях по списку их id.
     """
-    companies = []
+    companies = [
+        {
+            "id": "123",
+            "name": "Компания",
+            "description": "Описание компании",
+            "alternate_url": "https://example.com"
+        }
+    ]
     for company_id in ids:
         response = requests.get(f"{API_URL}/employers/{company_id}")
         if response.status_code == 200:
